@@ -1209,6 +1209,18 @@ export default function App() {
       }
     } catch (e) { console.error("Could not load form configs:", e.message); }
 
+    // examiners and examiner_submissions now require a signed-in admin to
+    // read directly (Phase 2) — an anonymous visitor (any examiner) gets
+    // an empty list here, which is fine: the examiner side no longer needs
+    // these tables at all, it goes through the narrow examiner_login /
+    // next_examiner_ref functions instead (see ExaminerPortal/createSubmission).
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      setExaminers([]); examinersRef.current = [];
+      setSubmissions([]);
+      return;
+    }
+
     try {
       const { data: examinerRows } = await supabase.from("examiners").select("*").order("created_at", { ascending: true });
       const built = (examinerRows || []).map((r) => ({
@@ -1243,6 +1255,15 @@ export default function App() {
       window.removeEventListener("focus", refreshAll);
       document.removeEventListener("visibilitychange", onVisible);
     };
+  }, []);
+
+  // examiners/examiner_submissions are only loaded above when a session
+  // exists (Phase 2) — re-run the load whenever sign-in/sign-out happens so
+  // the admin console populates right after login, and clears right after
+  // logout, without waiting for the next focus/visibility refresh.
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange(() => { refreshAll(); });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
   async function persistSettings(next) {
@@ -1289,9 +1310,23 @@ export default function App() {
   }
 
   async function createSubmission(examinerId, data) {
-    const seqNum = submissions.length + 1;
+    // Ref numbers used to come from submissions.length + 1 — the full client-side
+    // list. Phase 2 makes that list unreadable to an anonymous examiner (it's
+    // always empty for them now), so the number instead comes from a small
+    // atomic counter on the server (next_examiner_ref RPC — see
+    // security-upgrade-phase2.sql). Falls back to a clearly-distinct
+    // timestamp-based ref (never colliding with the sequential format) only if
+    // that RPC is unreachable, rather than risking a duplicate ref_no.
+    let seqNum = null;
+    try {
+      const { data: seqData, error: seqErr } = await supabase.rpc("next_examiner_ref");
+      if (seqErr) throw seqErr;
+      seqNum = seqData;
+    } catch (e) { console.error("Could not get next ref number (falling back to a timestamp-based one):", e.message); }
     const record = {
-      id: genId("sub"), examinerId, refNo: refNo(seqNum), status: "submitted", data,
+      id: genId("sub"), examinerId,
+      refNo: seqNum != null ? refNo(seqNum) : ("AEP-" + new Date().getFullYear() + "-T" + Date.now().toString(36).toUpperCase()),
+      status: "submitted", data,
       generated: false, generatedAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     setSubmissions((prev) => [...prev, record]);
@@ -1354,7 +1389,7 @@ export default function App() {
       {view === "landing" && <Landing settings={settings} onPick={setView} />}
       {view === "examiner" && (
         <ExaminerPortal
-          examiners={examiners} submissions={submissions} formConfigs={formConfigs} settings={settings}
+          formConfigs={formConfigs} settings={settings}
           createSubmission={createSubmission} updateSubmission={updateSubmission} onExit={() => setView("landing")}
         />
       )}
@@ -1447,10 +1482,11 @@ function validateSchemaData(schema, data, hideExaminerOnly) {
   return missing;
 }
 
-function ExaminerPortal({ examiners, submissions, formConfigs, settings, createSubmission, updateSubmission, onExit }) {
+function ExaminerPortal({ formConfigs, settings, createSubmission, updateSubmission, onExit }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loginErr, setLoginErr] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
   const [examiner, setExaminer] = useState(null);
   const [formData, setFormData] = useState({ remuneration: {}, vehicle: {}, flight: {} });
   const [existingSub, setExistingSub] = useState(null);
@@ -1458,13 +1494,28 @@ function ExaminerPortal({ examiners, submissions, formConfigs, settings, createS
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  function login() {
-    const match = examiners.find((e) => e.email.trim().toLowerCase() === email.trim().toLowerCase() && e.password === password);
-    if (!match) { setLoginErr("Incorrect email or password. Contact the Examination Cell if you've lost your credentials."); return; }
-    setLoginErr("");
+  // Phase 2: examiners and their submissions are no longer readable as raw
+  // tables by an anonymous visitor — this one narrow function (security
+  // definer, see security-upgrade-phase2.sql) checks the email/password and
+  // returns just that one examiner's own record plus their own existing
+  // submission (if any) in a single call, never anyone else's.
+  async function login() {
+    if (!email.trim() || !password) { setLoginErr("Enter your email and password."); return; }
+    setLoggingIn(true); setLoginErr("");
+    const { data, error: rpcErr } = await supabase.rpc("examiner_login", { p_email: email.trim(), p_password: password });
+    setLoggingIn(false);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (rpcErr || !row) { setLoginErr("Incorrect email or password. Contact the Examination Cell if you've lost your credentials."); return; }
+    const match = {
+      id: row.examiner_id, email: row.email, name: row.name || "", designation: row.designation || "",
+      mobile: row.mobile || "", categoryHint: row.category_hint || "", status: row.status || "invited",
+    };
     setExaminer(match);
-    const mine = submissions.find((s) => s.examinerId === match.id);
-    if (mine) {
+    if (row.submission_id) {
+      const mine = {
+        id: row.submission_id, examinerId: match.id, refNo: row.ref_no, status: row.submission_status,
+        data: row.data || {}, generated: !!row.generated, generatedAt: row.generated_at,
+      };
       setExistingSub(mine);
       setFormData({
         remuneration: mine.data.remuneration || {},
@@ -1556,7 +1607,7 @@ function ExaminerPortal({ examiners, submissions, formConfigs, settings, createS
               <input type="password" style={inputStyle} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && login()} />
             </Field>
             {loginErr && <div style={{ color: "#a13a2f", fontSize: 12.5, marginBottom: 10 }}>{loginErr}</div>}
-            <Btn onClick={login} style={{ width: "100%", justifyContent: "center" }}>Sign in</Btn>
+            <Btn onClick={login} disabled={loggingIn} style={{ width: "100%", justifyContent: "center" }}>{loggingIn ? "Signing in..." : "Sign in"}</Btn>
           </div>
         </div>
       </div>
