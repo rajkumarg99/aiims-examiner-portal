@@ -760,6 +760,13 @@ function StatCard({ label, value, color }) {
 function SchemaFieldInput({ def, value, onChange, readOnly }) {
   const disabled = readOnly || def.readOnly;
   const style = disabled ? { ...inputStyle, background: "#f7f9fb", color: "#33455c", fontWeight: 600 } : inputStyle;
+  if (def.type === "select" && readOnly) {
+    // Read-only views (generated document / print preview) show the chosen value as plain
+    // text. A disabled <select> can only display one of its own options, so a combined
+    // value such as Meal Request's "Veg" (an option of the follow-up field, not of this
+    // one) printed as the "Select…" placeholder.
+    return <div style={{ ...style, minHeight: 34, boxSizing: "border-box" }}>{value ?? def.default ?? ""}</div>;
+  }
   if (def.type === "select") {
     return (
       <select style={style} value={value ?? def.default ?? ""} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
@@ -1082,6 +1089,170 @@ function DocumentLetterhead({ schema, logoUrl }) {
       {schema.meta.subtitle && <div style={{ fontSize: 11.5, color: "#7a8794" }}>{schema.meta.subtitle}</div>}
     </div>
   );
+}
+
+/* ----------------------------------------------------------------------------
+   Excel export of a generated document — mirrors the printed layout (same
+   section order, same print-only rules: excludeFromPrint / printCombine /
+   printDisplay / printTitle / notes / signature / footer / vehicle sign-off),
+   built from the same schema so Form Builder edits flow through automatically.
+   Layout grid: 8 columns; a label/value row merges A:C (label) and D:H (value).
+   SheetJS Community Edition can't write cell styling (bold/borders), so this
+   reproduces structure, wording, merges and column widths, not fonts/borders.
+   -------------------------------------------------------------------------- */
+function buildDocSheet(schema, data) {
+  const derived = deriveForm(schema, data || {});
+  const flat = derived.flat;
+  const rows = [];
+  const merges = [];
+  const W = 8;
+  const printVars = { ...flat, name: flat.fullName, amount: Math.round(derived.grandTotal || 0).toLocaleString("en-IN") };
+  const pad = (arr) => { const a = arr.slice(); while (a.length < W) a.push(""); return a; };
+  function full(text, opts = {}) {
+    const r = rows.length;
+    rows.push(pad([text]));
+    merges.push({ s: { r, c: 0 }, e: { r, c: W - 1 } });
+    return r;
+  }
+  function pair(label, value) {
+    const r = rows.length;
+    rows.push(pad([label, "", "", value === undefined || value === null ? "" : value]));
+    merges.push({ s: { r, c: 0 }, e: { r, c: 2 } }, { s: { r, c: 3 }, e: { r, c: W - 1 } });
+  }
+  function blank() { rows.push(pad([])); }
+  const fmtVal = (f, v) => (f.type === "date" ? formatDateDDMMYYYY(v) : v);
+  function printValue(f) {
+    if (f.printCombine) return flat[f.id] === "Yes" ? (flat[f.printCombine] || flat[f.id]) : flat[f.id];
+    if (f.printCombineRange) return [flat[f.id], flat[f.printCombineRange]].filter(Boolean).join(" to ");
+    return flat[f.id];
+  }
+  const meta = schema.meta || {};
+  (meta.preHeaderLines || []).forEach((l) => full(l));
+  if (meta.org1) full(meta.org1);
+  if (meta.title) full(meta.title);
+  if (meta.subtitle) full(meta.subtitle);
+  if (meta.extraHeaderLine) full(meta.extraHeaderLine);
+  blank();
+
+  sortByOrder(schema.sections).forEach((sec) => {
+    if (!evalShowIf(sec.showIf, flat) || sec.excludeFromPrint) return;
+    const showTitle = sec.title && !sec.noTitleInPrint;
+    const titleText = sec.printTitle || sec.title;
+    if (sec.kind === "table") {
+      if (showTitle) full(titleText);
+      const cols = sortByOrder(sec.columns).filter((c) => !c.excludeFromPrint);
+      const head = cols.map((c) => (c.printDisplay ? c.printDisplay.label : c.label));
+      rows.push(pad(head));
+      const src = data?.[sec.id] && data[sec.id].length ? data[sec.id] : [];
+      const resolved = derived.resolvedRowsBySection[sec.id] || [];
+      (src.length ? src : [{}]).forEach((row, i) => {
+        const rf = resolved[i] || {};
+        rows.push(pad(cols.map((c) => {
+          if (c.printDisplay) return [formatDateDDMMYYYY(row[c.id]), row[c.printDisplay.pairWith]].filter(Boolean).join(" ");
+          const v = c.computed ? rf[c.id] : row[c.id];
+          if (c.type === "number") { const n = parseFloat(v); return isNaN(n) || v === "" || v === undefined ? "" : n; }
+          return fmtVal(c, v ?? "");
+        })));
+      });
+      if (sec.totalColumnId) {
+        rows.push(pad(cols.map((c, i) => (c.id === sec.totalColumnId ? derived.tableTotals[sec.id] || 0 : (i === 0 ? "Total" : "")))));
+      }
+      blank();
+      return;
+    }
+    const fields = sortByOrder(sec.fields).filter((f) => (f.printAlways || evalShowIf(f.showIf, flat)) && !f.excludeFromPrint);
+    if (fields.length === 0) return;
+    if (showTitle) full(titleText);
+    if (sec.printAsTable) {
+      rows.push(pad(fields.map((f) => f.label)));
+      rows.push(pad(fields.map((f) => (f.type === "number" ? (parseFloat(printValue(f)) || 0) : fmtVal(f, printValue(f) ?? "")))));
+    } else {
+      fields.forEach((f) => pair(f.label, f.type === "number" && printValue(f) !== "" ? (parseFloat(printValue(f)) || 0) : fmtVal(f, printValue(f) ?? "")));
+    }
+    blank();
+  });
+
+  const hasGrandTotal = (schema.sections || []).some((s) => (s.kind === "table" && s.includeInGrandTotal) || (s.kind === "fields" && (s.fields || []).some((f) => f.includeInGrandTotal)));
+  if (hasGrandTotal) {
+    pair("GRAND TOTAL (I + II + III + IV)", Math.round(derived.grandTotal || 0));
+    full(numToWords(derived.grandTotal));
+    blank();
+  }
+  const notes = () => {
+    if (!meta.notes || meta.notes.length === 0) return;
+    full(meta.notesTitle || "DECLARATION / NOTES");
+    meta.notes.forEach((n, i) => full(`${i + 1}. ${interpolate(n, printVars)}`));
+    blank();
+  };
+  const authority = () => {
+    const sb = meta.signatureBlock;
+    if (sb) {
+      full(`${sb.examinerLine || ""}    Date: ________________`);
+      blank();
+      if (sb.officeUse) {
+        full(sb.officeUse.title);
+        full(interpolate(sb.officeUse.certifiedText, printVars));
+        full("Total Amount claimed: Rs. ________________");
+        full("Total Payable Amount: Rs. ________________");
+        full(sb.officeUse.authoritySignature);
+        blank();
+      }
+    }
+    if (meta.footerAuthority) { meta.footerAuthority.forEach((l) => full(l)); blank(); }
+    if (meta.vehicleSignoff) {
+      const vs = meta.vehicleSignoff;
+      if (vs.date) full("Date: ________________");
+      full(vs.signatureLine);
+      (vs.routing || []).forEach((l) => full(l));
+      blank();
+      full("Office Use Only");
+      full(`${vs.deptVehicleLabel}: ${flat.v_deptVehicle || ""}   ________________`);
+      full(vs.taxiLine1);
+      rows.push(pad([vs.approverLeft, "", "", "", "", "", "", vs.approverRight]));
+      full("Approved: ________________     Not Approved: ________________");
+      full(vs.taxiLine2);
+      full(vs.finalApprover);
+      blank();
+    }
+  };
+  if (meta.notesPosition === "end") { authority(); notes(); } else { notes(); authority(); }
+  return { rows, merges };
+}
+// One sheet per document; filename supplied by the caller. Sheet names are limited to 31
+// characters by the .xlsx format.
+function downloadDocWorkbook(filename, docs) {
+  const wb = XLSX.utils.book_new();
+  docs.forEach(({ name, schema, data }) => {
+    const { rows, merges } = buildDocSheet(schema, data);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!merges"] = merges;
+    ws["!cols"] = [{ wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+  });
+  XLSX.writeFile(wb, filename);
+}
+// Bulk variant: one sheet per document type, with every examiner's document stacked
+// top-to-bottom (two blank rows between them) — so a whole category opens as three
+// sheets rather than 3 x N tabs.
+function downloadBulkWorkbook(filename, groups) {
+  const wb = XLSX.utils.book_new();
+  groups.forEach(({ name, items }) => {
+    const rows = [];
+    const merges = [];
+    items.forEach(({ schema, data }) => {
+      const built = buildDocSheet(schema, data);
+      const offset = rows.length;
+      built.rows.forEach((r) => rows.push(r));
+      built.merges.forEach((m) => merges.push({ s: { r: m.s.r + offset, c: m.s.c }, e: { r: m.e.r + offset, c: m.e.c } }));
+      rows.push(["", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", ""]);
+    });
+    if (rows.length === 0) rows.push(["No documents"]);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!merges"] = merges;
+    ws["!cols"] = [{ wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+  });
+  XLSX.writeFile(wb, filename);
 }
 function DocumentPrintView({ schema, data, logoUrl, minRemuneration }) {
   const derived = useMemo(() => deriveForm(schema, data), [schema, data]);
@@ -2641,6 +2812,16 @@ function SubmissionRow({ submission, examiner, formConfigs, updateSubmission, de
   // Which single document (if any) the next print should be limited to — null = all three.
   const [printOnly, setPrintOnly] = useState(null);
   useEffect(() => { setEditData(submission.data); }, [submission.id, submission.updatedAt]);
+  function excelDocs(which) {
+    const all = {
+      remuneration: { name: "Remuneration Bill", schema: remunSchema, data: editData.remuneration || {} },
+      vehicle: { name: "Vehicle Requisition", schema: formConfigs.vehicle, data: editData.vehicle || {} },
+      flight: { name: "Travel Programme (Air tickets)", schema: formConfigs.flight, data: editData.flight || {} },
+    };
+    const who = String(editData?.remuneration?.profile?.fullName || submission.refNo || "examiner").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    const docs = which ? [all[which]] : [all.remuneration, all.vehicle, all.flight];
+    downloadDocWorkbook(`${who}_${which || "all_documents"}.xlsx`, docs);
+  }
   function printDocs(which) {
     setPrintOnly(which);
     // Let React apply the hide-the-others class before the print dialog snapshots the page.
@@ -2712,6 +2893,12 @@ function SubmissionRow({ submission, examiner, formConfigs, updateSubmission, de
                 <Btn variant="outline" onClick={() => printDocs("flight")}><Printer size={14} /> Print Travel Programme (Air tickets)</Btn>
                 <Btn variant="outline" onClick={() => printDocs(null)}><Printer size={14} /> Print / Save all (3 documents)</Btn>
               </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                <Btn variant="outline" onClick={() => excelDocs("remuneration")}><FileSpreadsheet size={14} /> Excel — Remuneration Bill</Btn>
+                <Btn variant="outline" onClick={() => excelDocs("vehicle")}><FileSpreadsheet size={14} /> Excel — Vehicle Requisition</Btn>
+                <Btn variant="outline" onClick={() => excelDocs("flight")}><FileSpreadsheet size={14} /> Excel — Travel Programme (Air tickets)</Btn>
+                <Btn variant="outline" onClick={() => excelDocs(null)}><FileSpreadsheet size={14} /> Excel — all (3 sheets)</Btn>
+              </div>
               <div style={{ marginTop: 14 }}>
                 <SubmissionDocuments submission={{ ...submission, data: editData }} formConfigs={formConfigs} logoUrl={logoUrl} minRemuneration={minRemuneration} only={printOnly} />
               </div>
@@ -2756,6 +2943,15 @@ function AdminSubmissions({ examiners, submissions, formConfigs, updateSubmissio
     }
     setBulkPreview(true);
   }
+  function bulkExcel() {
+    const pick = (s) => ({ ...s, data: s.data || {} });
+    const list = bulkList.map(pick);
+    downloadBulkWorkbook(`${bulkCategory.replace(/[^A-Za-z0-9]+/g, "_")}_generated_documents.xlsx`, [
+      { name: "Remuneration Bills", items: list.map((s) => ({ schema: remunerationSchemaFor(bulkCategory, formConfigs), data: s.data.remuneration || {} })) },
+      { name: "Vehicle Requisitions", items: list.map((s) => ({ schema: formConfigs.vehicle, data: s.data.vehicle || {} })) },
+      { name: "Travel Programmes (Air)", items: list.map((s) => ({ schema: formConfigs.flight, data: s.data.flight || {} })) },
+    ]);
+  }
   const bulkList = bulkCategory ? submissions.filter((s) => (s.data?.remuneration?.billMeta?.examCategory || "") === bulkCategory && s.status === "generated") : [];
 
   return (
@@ -2787,6 +2983,7 @@ function AdminSubmissions({ examiners, submissions, formConfigs, updateSubmissio
           </select>
           <Btn onClick={bulkGenerate} disabled={!bulkCategory}>Generate all ungenerated in this category</Btn>
           {bulkList.length > 0 && <Btn variant="outline" onClick={() => window.print()}><Printer size={14} /> Print all generated ({bulkList.length})</Btn>}
+          {bulkList.length > 0 && <Btn variant="outline" onClick={bulkExcel}><FileSpreadsheet size={14} /> Excel — all generated ({bulkList.length})</Btn>}
         </div>
         {bulkPreview && bulkList.length > 0 && (
           <div className="print-area" style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 20 }}>
