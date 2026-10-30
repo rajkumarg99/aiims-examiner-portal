@@ -1870,13 +1870,6 @@ function ExaminerPortal({ formConfigs, settings, createSubmission, updateSubmiss
           )}
 
           <SchemaForm schema={remunSchema} data={formData.remuneration} onChange={(d) => setFormData((p) => ({ ...p, remuneration: d }))} startN={1} hideExaminerOnly />
-          {originType === "Outside Telangana" && (
-            <p style={{ fontSize: 12, color: "#7a8794", margin: "-8px 0 14px" }}>
-              Note: AIIMS Bibinagar can only send a vehicle for the Hyderabad Airport ↔ AIIMS Bibinagar leg below.
-              For travel between your own home/institute and your departure airport, please claim it as a
-              travelling allowance in the <strong>"II. Travelling"</strong> table above instead of here.
-            </p>
-          )}
           {flightBeforeVehicle ? (
             <>
               {showFlight && flightForm}
