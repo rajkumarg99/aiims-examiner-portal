@@ -279,13 +279,13 @@ function buildSharedRemunSections() {
       // original "Departure, date & time" / "Arrival, date & time" columns; printDisplay
       // recombines the pair back into a single column on the generated document.
       { id: "depDate", label: "Departure Date", type: "date", required: true, order: 1, colWidth: 105, printDisplay: { label: "Departure, date & time", pairWith: "depTime" } },
-      { id: "depTime", label: "Departure Time", type: "time", required: true, order: 2, colWidth: 95, excludeFromPrint: true },
+      { id: "depTime", label: "Departure Time", type: "time", required: true, order: 2, colWidth: 95, excludeFromPrint: true, hiddenFromExaminer: true },
       { id: "arrDate", label: "Arrival Date", type: "date", required: true, order: 3, colWidth: 105, printDisplay: { label: "Arrival, date & time", pairWith: "arrTime" } },
       { id: "arrTime", label: "Arrival Time", type: "time", required: true, order: 4, colWidth: 95, excludeFromPrint: true },
       { id: "dist", label: "Distance (km)", type: "number", order: 5, colWidth: 90 },
       { id: "mode", label: "Mode of Journey", type: "text", order: 6, placeholder: "bus/car/train/air", colWidth: 110 },
       // Wider than a plain number column so the full claim figure is always visible.
-      { id: "amt", label: "Claim Amount (Rs.)", type: "number", order: 7, colWidth: 130 },
+      { id: "amt", label: "Claim Amount (Rs.)", type: "number", order: 7, colWidth: 130, hiddenFromExaminer: true },
       // Widened per feedback — the previous width was too cramped to type a useful note.
       { id: "rem", label: "Remarks", type: "text", order: 8, colWidth: 220 },
     ]},
@@ -939,6 +939,10 @@ function SchemaTableSection({ section, rows, resolvedRows, onRowsChange, readOnl
   let cols = printMode
     ? allCols.filter((c) => !c.excludeFromPrint).map((c) => (c.printDisplay ? { ...c, label: c.printDisplay.label, _pairWith: c.printDisplay.pairWith } : c))
     : allCols;
+  // Column-level hiddenFromExaminer (e.g. Travelling table's Departure Time / Claim Amount,
+  // which the office fills in from the itinerary) — dropped from the examiner's view only;
+  // admin editor and generated document are unaffected.
+  if (hideExaminerOnly && !printMode) cols = cols.filter((c) => !c.hiddenFromExaminer);
   function updateCell(i, colId, val) { onRowsChange(list.map((r, idx) => (idx === i ? { ...r, [colId]: val } : r))); }
   function addRow() { onRowsChange([...list, {}]); }
   function removeRow(i) { onRowsChange(list.filter((_, idx) => idx !== i)); }
@@ -1004,7 +1008,7 @@ function SchemaTableSection({ section, rows, resolvedRows, onRowsChange, readOnl
                 )}
               </tr>
             ))}
-            {section.totalColumnId && (
+            {section.totalColumnId && cols.some((c) => c.id === section.totalColumnId) && (
               <tr>
                 {cols.map((c, i) => (
                   <td key={c.id} style={{ padding: "6px 8px", fontWeight: 700, fontSize: 12 }}>
@@ -1453,14 +1457,14 @@ function validateSchemaData(schema, data, hideExaminerOnly) {
     if (!evalShowIf(s.showIf, flat)) return;
     if (hideExaminerOnly && s.hiddenFromExaminer) return;
     if (s.kind === "table") {
-      const requiredCols = (s.columns || []).filter((c) => c.required);
+      const requiredCols = (s.columns || []).filter((c) => c.required && !(hideExaminerOnly && c.hiddenFromExaminer));
       if (requiredCols.length === 0) return;
       const rows = data?.[s.id] && data[s.id].length ? data[s.id] : [];
       // Only enforce required columns on a row the examiner has actually started filling
       // in (any cell non-empty) — a table with no journeys entered at all is allowed, but
       // a half-filled journey (e.g. a date with no time) is not.
       rows.forEach((row, i) => {
-        const touched = (s.columns || []).some((c) => String(row[c.id] || "").trim());
+        const touched = (s.columns || []).some((c) => !(hideExaminerOnly && c.hiddenFromExaminer) && String(row[c.id] || "").trim());
         if (!touched) return;
         requiredCols.forEach((c) => {
           if (!String(row[c.id] || "").trim()) missing.push(`${s.title || s.id} row ${i + 1} — ${c.label}`);
