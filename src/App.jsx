@@ -2234,7 +2234,7 @@ function AdminExaminers({ examiners, persistExaminers, submissions, formConfigs,
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ background: "#f7f9fb", textAlign: "left" }}>
-              <th style={{ padding: "6px 10px" }}>Email</th><th style={{ padding: "6px 10px" }}>Name</th>
+              <th style={{ padding: "6px 10px" }}>Name</th><th style={{ padding: "6px 10px" }}>Email</th>
               <th style={{ padding: "6px 10px" }}>Password</th>
               <th style={{ padding: "6px 10px" }}>Status</th><th style={{ padding: "6px 10px" }}>Submissions</th>
               <th style={{ padding: "6px 10px" }}>Actions</th>
@@ -2243,8 +2243,8 @@ function AdminExaminers({ examiners, persistExaminers, submissions, formConfigs,
           <tbody>
             {examiners.map((e) => (
               <tr key={e.id} style={{ borderTop: "1px solid #eef1f5" }}>
-                <td style={{ padding: "6px 10px" }}>{e.email}</td>
                 <td style={{ padding: "6px 10px" }}>{e.name || "—"}</td>
+                <td style={{ padding: "6px 10px" }}>{e.email}</td>
                 <td style={{ padding: "6px 10px", fontFamily: "monospace" }}>{e.password}</td>
                 <td style={{ padding: "6px 10px" }}><StatusPill status={e.status} /></td>
                 <td style={{ padding: "6px 10px" }}>{submittedCountFor(e.id)}</td>
