@@ -336,7 +336,8 @@ function buildSharedRemunSections() {
     // App-only routing question (decides whether Vehicle/Flight sections apply) — not
     // part of the physical Remuneration Bill, so left out of the generated document.
     { id: "travelOrigin", title: "Travel Origin", order: 9, kind: "fields", excludeFromPrint: true, fields: [
-      { id: "originType", label: "Are you travelling from within Telangana or outside Telangana?", type: "select", options: ["Within Telangana", "Outside Telangana"], required: true, order: 1 },
+      { id: "originType", label: "Are you travelling from within Telangana or outside Telangana?", type: "select", options: ["Within Telangana", "Outside Telangana", "Not applicable"], required: true, order: 1,
+        hint: "This is only to clarify whether AIIMS needs to arrange an air ticket and/or a vehicle for you. Outside Telangana: you will be asked for air ticket (Travel Programme) and vehicle details. Within Telangana: you will be asked only whether you need an institute vehicle. Not applicable: no air ticket or vehicle booking is needed — nothing further to fill in." },
       { id: "vehicleChoice", label: "Vehicle for local travel", type: "select", options: ["Institute vehicle required", "Own vehicle — no institute vehicle needed"], required: true, order: 2, showIf: { field: "originType", equals: "Within Telangana" } },
     ]},
   ];
@@ -914,7 +915,7 @@ function SchemaFieldsSection({ section, values, flat, onFieldChange, readOnly, n
           const val = printMode ? printValue(f) : (f.readOnly ? flat[f.id] : (values?.[f.id] ?? f.default ?? ""));
           // 24-hour format hint on time fields so entries like "2:30" can't be misread
           // as AM/PM — the input itself is forced to a 24-hour clock (see SchemaFieldInput).
-          const hint = f.type === "time" && !printMode ? "24-hour format, e.g. 14:30" : undefined;
+          const hint = printMode ? undefined : (f.hint || (f.type === "time" ? "24-hour format, e.g. 14:30" : undefined));
           return (
             <Field key={f.id} label={f.label} required={f.required} hint={hint}>
               <SchemaFieldInput def={f} value={val} readOnly={readOnly} onChange={(v) => onFieldChange(f.id, v)} />
@@ -1888,7 +1889,7 @@ function ExaminerPortal({ formConfigs, settings, createSubmission, updateSubmiss
               {showFlight && flightForm}
             </>
           )}
-          {originType && !showVehicle && !showFlight && (
+          {originType && originType !== "Not applicable" && !showVehicle && !showFlight && (
             <p style={{ fontSize: 12, color: "#7a8794", marginTop: 6 }}>
               You've indicated you'll use your own vehicle for local travel, so no Vehicle Requisition is needed —
               please claim this journey as a travelling allowance in the <strong>"II. Travelling"</strong> table
@@ -2074,6 +2075,13 @@ function allCategoryOptions(formConfigs) {
 function withAllCategoryOptions(schema, formConfigs) {
   const patched = deepClone(schema);
   getCategoryFieldFromSchema(patched).options = allCategoryOptions(formConfigs);
+  // Make sure the Travel Origin question always offers "Not applicable" (no travel — no
+  // vehicle/flight needed), even when this schema was saved in the database before that
+  // option existed — so no Form Builder edit/Reset is needed on the live forms.
+  (patched.sections || []).forEach((sec) => (sec.fields || []).forEach((f) => {
+    if (f.id === "originType" && Array.isArray(f.options) && !f.options.includes("Not applicable")) f.options = [...f.options, "Not applicable"];
+    if (f.id === "originType" && !f.hint) f.hint = "This is only to clarify whether AIIMS needs to arrange an air ticket and/or a vehicle for you. Outside Telangana: you will be asked for air ticket (Travel Programme) and vehicle details. Within Telangana: you will be asked only whether you need an institute vehicle. Not applicable: no air ticket or vehicle booking is needed — nothing further to fill in.";
+  }));
   return patched;
 }
 
