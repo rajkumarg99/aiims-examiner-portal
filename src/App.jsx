@@ -263,7 +263,7 @@ function buildSharedRemunSections() {
     // details fields start right under the "BILL/REMUNERATION FORM" title. "Examiner
     // Details" is an on-screen-only label to orient the examiner; noTitleInPrint drops it.
     { id: "profile", title: "Examiner Details", order: 2, kind: "fields", noTitleInPrint: true, fields: [
-      { id: "fullName", label: "Full Name (BLOCK letters)", type: "text", required: true, order: 1 },
+      { id: "fullName", label: "Full Name (As per ID proof)", type: "text", required: true, order: 1 },
       { id: "designation", label: "Designation", type: "text", required: true, order: 2 },
       { id: "basicPay", label: "Basic Pay & Scale of Pay", type: "text", order: 3 },
       { id: "mobile", label: "Mobile Number", type: "tel", required: true, order: 4 },
@@ -619,7 +619,7 @@ function defaultFormConfigs() {
         // "Date & Time" column the reference xlsx actually has (see row 29 of the format)
         // on the generated document, matching the same pattern used for the Remuneration
         // Bill's Travelling itinerary table.
-        { id: "travel", title: "Travel Programme", order: 2, kind: "table", addRowLabel: "Add sector", columns: [
+        { id: "travel", title: "Travel Programme (Air tickets)", printTitle: "Travel Programme", order: 2, kind: "table", addRowLabel: "Add sector", columns: [
           { id: "date", label: "Date", type: "date", required: true, order: 1, printDisplay: { label: "Date & Time", pairWith: "time" } },
           { id: "time", label: "Time", type: "time", required: true, order: 2, excludeFromPrint: true },
           { id: "from", label: "From", type: "text", order: 3 },
@@ -1386,6 +1386,7 @@ export default function App() {
           .print-area, .print-area * { visibility: visible; }
           .print-area { position: absolute; left: 0; top: 0; width: 100%; }
           .print-page-break { break-after: page; page-break-after: always; }
+          .no-print-doc { display: none !important; }
           * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           @page { size: A4; margin: 8mm; }
         }
@@ -2622,14 +2623,14 @@ function AdminFormBuilder({ formConfigs, persistFormConfig, resetFormConfig }) {
    (including the workload counts that feed the rate formulas) before
    generating. Examiners never see this "Generate" step or its output.
    ========================================================================== */
-function SubmissionDocuments({ submission, formConfigs, logoUrl, minRemuneration }) {
+function SubmissionDocuments({ submission, formConfigs, logoUrl, minRemuneration, only }) {
   const remunCategory = submission.data?.remuneration?.billMeta?.examCategory || "";
   const remunSchema = remunerationSchemaFor(remunCategory, formConfigs);
   return (
     <div className="print-area" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div className="print-page-break"><DocumentPrintView schema={remunSchema} data={submission.data.remuneration || {}} logoUrl={logoUrl} minRemuneration={minRemuneration} /></div>
-      <div className="print-page-break"><DocumentPrintView schema={formConfigs.vehicle} data={submission.data.vehicle || {}} logoUrl={logoUrl} /></div>
-      <div><DocumentPrintView schema={formConfigs.flight} data={submission.data.flight || {}} logoUrl={logoUrl} /></div>
+      <div className={"print-page-break" + (only && only !== "remuneration" ? " no-print-doc" : "")}><DocumentPrintView schema={remunSchema} data={submission.data.remuneration || {}} logoUrl={logoUrl} minRemuneration={minRemuneration} /></div>
+      <div className={"print-page-break" + (only && only !== "vehicle" ? " no-print-doc" : "")}><DocumentPrintView schema={formConfigs.vehicle} data={submission.data.vehicle || {}} logoUrl={logoUrl} /></div>
+      <div className={only && only !== "flight" ? "no-print-doc" : ""}><DocumentPrintView schema={formConfigs.flight} data={submission.data.flight || {}} logoUrl={logoUrl} /></div>
     </div>
   );
 }
@@ -2637,7 +2638,14 @@ function SubmissionDocuments({ submission, formConfigs, logoUrl, minRemuneration
 function SubmissionRow({ submission, examiner, formConfigs, updateSubmission, deleteSubmission, open, onToggle, logoUrl, minRemuneration }) {
   const [editData, setEditData] = useState(submission.data);
   const [saved, setSaved] = useState(false);
+  // Which single document (if any) the next print should be limited to — null = all three.
+  const [printOnly, setPrintOnly] = useState(null);
   useEffect(() => { setEditData(submission.data); }, [submission.id, submission.updatedAt]);
+  function printDocs(which) {
+    setPrintOnly(which);
+    // Let React apply the hide-the-others class before the print dialog snapshots the page.
+    setTimeout(() => { window.print(); setPrintOnly(null); }, 150);
+  }
 
   const category = editData?.remuneration?.billMeta?.examCategory || "—";
   // Same widened dropdown as the examiner portal — lets the admin move a submission
@@ -2698,9 +2706,14 @@ function SubmissionRow({ submission, examiner, formConfigs, updateSubmission, de
 
           {submission.status === "generated" && (
             <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px dashed #dde3ea" }}>
-              <Btn variant="outline" onClick={() => window.print()}><Printer size={14} /> Print / Save PDF (all 3 documents)</Btn>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Btn variant="outline" onClick={() => printDocs("remuneration")}><Printer size={14} /> Print Remuneration Bill</Btn>
+                <Btn variant="outline" onClick={() => printDocs("vehicle")}><Printer size={14} /> Print Vehicle Requisition</Btn>
+                <Btn variant="outline" onClick={() => printDocs("flight")}><Printer size={14} /> Print Travel Programme (Air tickets)</Btn>
+                <Btn variant="outline" onClick={() => printDocs(null)}><Printer size={14} /> Print / Save all (3 documents)</Btn>
+              </div>
               <div style={{ marginTop: 14 }}>
-                <SubmissionDocuments submission={{ ...submission, data: editData }} formConfigs={formConfigs} logoUrl={logoUrl} minRemuneration={minRemuneration} />
+                <SubmissionDocuments submission={{ ...submission, data: editData }} formConfigs={formConfigs} logoUrl={logoUrl} minRemuneration={minRemuneration} only={printOnly} />
               </div>
             </div>
           )}
